@@ -39,6 +39,80 @@ Logger::Logger(){
 	stats.w_total = 0;
 }
 
+pub fn add_any_port(
+        &self,
+        protocol: PortMappingProtocol,
+        local_addr: SocketAddrV4,
+        lease_duration: u32,
+        description: &str,
+    ) -> Result<u16, AddAnyPortError> {
+        // This function first attempts to call AddAnyPortMapping on the IGD with a random port
+        // number. If that fails due to the method being unknown it attempts to call AddPortMapping
+        // instead with a random port number. If that fails due to ConflictInMappingEntry it retrys
+        // with another port up to a maximum of 20 times. If it fails due to SamePortValuesRequired
+        // it retrys once with the same port values.
+
+        if local_addr.port() == 0 {
+            return Err(AddAnyPortError::InternalPortZeroInvalid);
+        }
+
+        let schema = self.control_schema.get("AddAnyPortMapping");
+        if let Some(schema) = schema {
+            let external_port = common::random_port();
+
+            parsing::parse_add_any_port_mapping_response(self.perform_request(
+                messages::ADD_ANY_PORT_MAPPING_HEADER,
+                &messages::format_add_any_port_mapping_message(
+                    schema,
+                    protocol,
+                    external_port,
+                    local_addr,
+                    lease_duration,
+                    description,
+                ),
+                "AddAnyPortMappingResponse",
+            ))
+        } else {
+            self.retry_add_random_port_mapping(protocol, local_addr, lease_duration, description)
+        }
+    }
+
+    fn retry_add_random_port_mapping(
+        &self,
+        protocol: PortMappingProtocol,
+        local_addr: SocketAddrV4,
+        lease_duration: u32,
+        description: &str,
+    ) -> Result<u16, AddAnyPortError> {
+        const ATTEMPTS: usize = 20;
+
+        for _ in 0..ATTEMPTS {
+            if let Ok(port) = self.add_random_port_mapping(protocol, local_addr, lease_duration, &description) {
+                return Ok(port);
+            }
+        }
+
+        Err(AddAnyPortError::NoPortsAvailable)
+    }
+
+    fn add_random_port_mapping(
+        &self,
+        protocol: PortMappingProtocol,
+        local_addr: SocketAddrV4,
+        lease_duration: u32,
+        description: &str,
+    ) -> Result<u16, AddAnyPortError> {
+        let external_port = common::random_port();
+
+        if let Err(err) = self.add_port_mapping(protocol, external_port, local_addr, lease_duration, &description) {
+            match parsing::convert_add_random_port_mapping_error(err) {
+                Some(err) => return Err(err),
+                None => return self.add_same_port_mapping(protocol, local_addr, lease_duration, description),
+            }
+        }
+
+        Ok(external_port)
+    }
 Logger::~Logger(){
 	if(mutex){
 		pthread_mutex_destroy(mutex);
